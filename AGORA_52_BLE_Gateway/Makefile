@@ -97,6 +97,7 @@ SRC_FILES += \
 # Required Embedded Planet Source Files
 SRC_FILES += \
   ../source/BLE_Gateway/main.c \
+  ../source/BLE_Gateway/cellularTask.c \
 
 # Include folders common to all targets
 INC_FOLDERS += \

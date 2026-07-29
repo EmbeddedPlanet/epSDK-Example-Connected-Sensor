@@ -56,6 +56,9 @@
 #include "qspi_helper.h"
 #include "led_helper.h"
 #include "time_helper.h"
+#if defined(THINGSBOARD_HTTPS_INTEGRATION) || defined(AZURE_MQTTS_X509) || defined(AWS_MQTTS_X509) || defined(AWS_HTTPS_X509) || defined(AZURE_MQTTS_SAS) || defined(AZURE_HTTPS_SAS)
+#include "nrf_crypto.h"
+#endif
 
 SemaphoreHandle_t cellularSemaphore;
 QueueHandle_t xCellQueue;
@@ -64,6 +67,8 @@ SemaphoreHandle_t xSensPwrEnSemaphore;
 
 TaskHandle_t ledTaskHandle;
 TaskHandle_t sensorSampleTaskHandle;
+TaskHandle_t cellularTaskHandle;
+TaskHandle_t mqttTaskHandle;
 
 //Activate / deactivate onboard sensors
 #define SI7021_ACTIVE   1
@@ -71,7 +76,7 @@ TaskHandle_t sensorSampleTaskHandle;
 #define ICM20602_ACTIVE 0
 
 #define mainLED_TASK_STACK_SIZE             128
-#define mainCell_TASK_STACK_SIZE            4500
+#define mainCell_TASK_STACK_SIZE            8196
 #define DEAD_BEEF                           0xDEADBEEF                              /**< Value used as error code on stack dump, can be used to identify stack location on stack unwind. */
 #define OSTIMER_WAIT_FOR_QUEUE              2                                       /**< Number of ticks to wait for the timer queue to be ready */
 #define CELL_QUEUE_TIMEOUT                  pdMS_TO_TICKS(3000)                     /** Time to wait on queue before moving on to the next sample */
@@ -81,7 +86,8 @@ TaskHandle_t sensorSampleTaskHandle;
 ICM20602 icm;
 #endif
 
-CellStatus_t cell_status;
+// Frame counter for payload
+static uint8_t frameCounter = 0;
 
 system_info_struct system_info;
 
@@ -95,7 +101,7 @@ static uint32_t cellTransInt = MIN_TRANS_INTERVAL;
 static const nrfx_twi_t twi = NRFX_TWI_INSTANCE(TWI_INSTANCE_ID);
 
 /* Initial PDP config */
-CellularBLEConfig_t pdnConfig = { ATT_PDN, CELLULAR_PDN_CONTEXT_IPV4, "" };
+CellularBLEConfig_t pdnConfig = { '\0' };
 
 /* TWI initialization */
 void twi_init (void)
@@ -119,91 +125,11 @@ void twi_init (void)
 /* Task for reading local sensors and adding to cell data queue */
 void sensorSampleTask(void *pvParameters);
 
-/* The task function to setup cellular with thread ready environment. */
-static void CellularTask( void * pvParameters );
-
 /* Miscellaneous initialization including preparing the logging and cell. */
 static void prvMiscInitialization( void );
 
 /* Helper function for making received Agora version numbers more readable */
 static void parse_version(char* version, char* conv_fw_ver);
-
-
-/*-----------------------------------------------------------*/
-// Taken from FreeRTOS demo: https://github.com/FreeRTOS/FreeRTOS/blob/main/FreeRTOS-Plus/Demo/FreeRTOS_Cellular_Interface_Windows_Simulator/Common/main.c
-//Cellular communication task
-static void CellularTask( void * pvParameters )
-{
-    bool first_run = true;
-    bool retCellular = false;
-    cellParam cellParams = {0};
-    uint32_t regTimeout = 900; // 900s registration timeout
-
-    // Set cell parameters, must be called prior to scheduler starting if using SSL/TLS due to NRF SDK incompatibilities
-    strncpy(cellParams.appVersion, system_info.updateVerStr, strlen(system_info.updateVerStr));
-    strncpy(cellParams.brokerAddrPost, IOT_BROKER_ADDRESS_POST, strlen(IOT_BROKER_ADDRESS_POST));
-    strncpy(cellParams.brokerAddrGet, IOT_BROKER_ADDRESS_GET, strlen(IOT_BROKER_ADDRESS_GET));
-    cellParams.carrier = CELLULAR_CARRIER;
-    strncpy(cellParams.cert, CERTIFICATE, sizeof(CERTIFICATE));
-    cellParams.gnssStatus = TELIT_GNSS_STATUS;
-    cellParams.gnssInterval = GNSS_ATTEMPT_INTERVAL;
-    cellParams.gnssTimeout = GNSS_TIMEOUT;
-    strncpy(cellParams.serverAddrPrefixPost, SERVER_ADDR_PREFIX_POST, strlen(SERVER_ADDR_PREFIX_POST));
-    strncpy(cellParams.serverAddrPrefixGet, SERVER_ADDR_PREFIX_GET, strlen(SERVER_ADDR_PREFIX_GET));
-    strncpy(cellParams.serverAttribSuffix, SERVER_ADDR_SUFFIX_ATTR, strlen(SERVER_ADDR_SUFFIX_ATTR));
-    strncpy(cellParams.serverDownloadSuffix, SERVER_ADDR_SUFFIX_FOTA, strlen(SERVER_ADDR_SUFFIX_FOTA));
-    strncpy(cellParams.serverTelemSuffix, SERVER_ADDR_SUFFIX_TELE, strlen(SERVER_ADDR_SUFFIX_TELE));
-    cellParams.accessTokenInPathPost = SERVER_PATH_ACCESS_TOKEN_POST_ENABLED;
-    cellParams.accessTokenInPathGet = SERVER_PATH_ACCESS_TOKEN_GET_ENABLED;
-    strncpy(cellParams.pvtKey, PVT_KEY, sizeof(PVT_KEY));
-    strncpy(cellParams.rootCA1, ROOT_CA1, sizeof(ROOT_CA1));
-    strncpy(cellParams.mqttTopicString, MQTT_TOPIC, sizeof(MQTT_TOPIC));
-    cellParams.technology = CELLULAR_TECH;
-    cellParams.checksumMethod = otapal_CHECKSUM_METHOD;
-    cellParams.fotaFlashStart = otapal_FLASH_START;
-    cellParams.fotaDescrTblStart = otapal_DESCRIPTOR_START;
-    cellParams.fotaBankSize = otapal_BANK_SIZE;
-    cellParams.cellOnOffPin = CELL_ON_OFF;
-    cellParams.cellPwrEnPin = CELL_PWR_EN;
-    cellParams.cellRTSPin = CELL_RTS_PIN_NUMBER;
-    cellParams.payloadFormat = CELL_PAYLOAD_FORMAT;
-
-    // Initialize cell
-    retCellular = cellInit( &cellParams, &pdnConfig );    
-
-    if( retCellular != true )
-    {
-        DBGI("Cellular failed to initialize.\r\n");
-    }
-    else
-    {
-        DBGI( ( "Cellular successfully initialized.\r\n" ) );  
-    }
-    //runCellular once prior to loop because first transmission is configured to never try for a GNSS fix
-    cellStatus = runCellular(cellTransInt, regTimeout);
-    for(;;)
-    {
-        vTaskDelay(pdMS_TO_TICKS(15000));
-        while(xQueuePeek(xCellQueue, NULL, 0) == pdTRUE){
-            if(!first_run){
-                // Reenable LED task
-                led_resume();
-                vTaskResume( ledTaskHandle );
-            }else{
-                first_run = false;
-            }
-
-            //This call of function to get unit registered to network and connected to desired endpoint address
-            cell_status = runCellular(cellTransInt, regTimeout);
-
-            // Suspend LED task
-            vTaskSuspend( ledTaskHandle );
-            // Enable debug out for LED
-            led_pause();
-        }        
-    }
-    vTaskDelete( NULL );
-}
 
 /*-----------------------------------------------------------*/
 static void LEDTask( void * pvParameters )
@@ -345,7 +271,7 @@ static void prvMiscInitialization( void )
         system_info.updateVerMaj = ( ( xDescriptor.updateVersion >> 24 ) & 0xFF );
         system_info.updateVerMin = ( ( xDescriptor.updateVersion >> 16 ) & 0xFF );
         system_info.updateVerBui = ( xDescriptor.updateVersion & 0xFFFF );
-        sprintf( system_info.updateVerStr,"%02d.%02d.%02ld", system_info.updateVerMaj, system_info.updateVerMin, system_info.updateVerBui );
+        sprintf( system_info.updateVerStr,"%02x.%02x.%02x", system_info.updateVerMaj, system_info.updateVerMin, system_info.updateVerBui );
     }
     else
     {
@@ -354,7 +280,7 @@ static void prvMiscInitialization( void )
         system_info.updateVerMin = VERSION_MINOR;
         system_info.updateVerBui = VERSION_BUILD;
         /* Set string version */
-        sprintf( system_info.updateVerStr,"%02d.%02d.%02ld", system_info.updateVerMaj, system_info.updateVerMin, system_info.updateVerBui );
+        sprintf( system_info.updateVerStr,"%02x.%02x.%02x", system_info.updateVerMaj, system_info.updateVerMin, system_info.updateVerBui );
     }
 
     /* Read production table in external flash */
@@ -415,13 +341,34 @@ static void prvMiscInitialization( void )
         DBGE("xCellQueue creation failed!");
     }
 
+    #if defined(THINGSBOARD_HTTPS_INTEGRATION) || defined(AZURE_MQTTS_X509) || defined(AWS_MQTTS_X509) || defined(AWS_HTTPS_X509) || defined(AZURE_MQTTS_SAS) || defined(AZURE_HTTPS_SAS)
+    //If protocol is MQTT, then initialize crypto here
+    if( nrf_crypto_init() != NRF_SUCCESS)
+    {
+        DBGE(("Failed to initialize nrf crypto"));
+    }
+    #endif
+
+    #if defined(AZURE_MQTTS_X509) || defined(AWS_MQTTS_X509)|| defined(AZURE_MQTTS_SAS)
+    //If protocol is MQTT and persistent then create task to manage connection
+    if( PERSISTENT_CONNECT_FLAG == false )
+    {
+        xTaskCreate( mqttTask,
+                    "mqttTask",
+                    MQTT_TASK_STACK_SIZE,
+                    NULL,
+                    tskIDLE_PRIORITY+2,
+                    &mqttTaskHandle );
+    }
+    #endif
+
     /* Create the task to run tests. */
     xTaskCreate( CellularTask,
                 "CellularTask",
                 mainCell_TASK_STACK_SIZE,
                 NULL,
                 tskIDLE_PRIORITY+2,
-                NULL ); 
+                NULL );
 
 #if BLE_ACTIVE
     DBGI( ( "BLE Task Initializing .\r\n" ) );
@@ -436,9 +383,6 @@ static void prvMiscInitialization( void )
 void sensorSampleTask(void *pvParameters)
 {
     nrfx_err_t err;
-    
-    // Frame counter for payload
-    static uint8_t frameCounter = 0;
 
     init_uart(TASK_1);
 
@@ -467,20 +411,38 @@ void sensorSampleTask(void *pvParameters)
 
         //Get latest cell diagnostic values
         cellDiag parameters = {'\0'};
-        if( queryCellularDiag(&parameters) != CELLULAR_SUCCESS )
+        if( queryCellularDiag(&parameters) != CellSuccess )
         {
-            /* Do not send if unable to attain values */
+            /* Keep trying if unable to attain values */
             continue;
         }
+
+        //Loop and give time for IMEI during power up
+        uint8_t loopCnt = 0;
+        DBGI("Waiting for IMEI to be received");
+        while( parameters.imei[0] == 0 && parameters.imei[15] == 0 )
+        {
+            vTaskDelay(pdMS_TO_TICKS(500));
+            queryCellularDiag(&parameters);
+            loopCnt++;
+            if(loopCnt > 240)
+            {
+                break;
+            }
+        }
+        //Cannot send data on this loop if IMEI is unavailable
+        if(loopCnt > 240)
+        {
+            DBGE("No IMEI to receive");
+            continue;
+        }
+        DBGI("IMEI received");
         
         //Get current time. In seconds if we have already synced time via cellular or GNSS. If not, this represents the run time of the system.
         uint32_t ts = get_time_s();
 
-        //Set and adjust transmission frame counter
-        if(frameCounter >= 0xFF){
-            frameCounter = 0;
-        }
-        frameCounter++;
+        //Increment frame counter or roll over if needed
+        frameCounter = (uint8_t) (frameCounter + 1);
 
         //Get SI7021 data if active and available
         float si_temp, si_hum;
@@ -602,84 +564,144 @@ void sensorSampleTask(void *pvParameters)
             DBGE("Cell queue Timeout!");
         }
 
+        // Set flag
+        newDataAdded = true;
+
+        // Resume mqtt task
+        if(strstr( IOT_BROKER_ADDRESS_POST, "mqtt" ) != NULL && PERSISTENT_CONNECT_FLAG != true){
+            vTaskResume( mqttTaskHandle );
+        }
+
+        parse_downlink();
+
         //Deinit the compact payload and put the task to sleep
         epcp_builder_agora_deinit(&agora_compact_payload);
         vTaskDelay(pdMS_TO_TICKS(cellTransInt * 1000));
     }
 }
 
-void appendMsgWithGNSS( void )
+void addGnssQueueMsg( bool status )
 {
     //Create message to send to queue
-    cell_queue_msg cell_msg;
     static uint32_t prevFixTime = 0;
 
-    if( xQueuePeek( xCellQueue,
-                        &( cell_msg ),
-                        ( TickType_t ) 10 ) == pdTRUE )
+    cellDiag parameters = {'\0'};
+    //Get latest cell values
+    if( queryCellularDiag(&parameters) != CellSuccess )
     {
-        if(cell_msg.has_gnss){
-            //This message already contains GNSS information
+        /* retry once */
+        if( queryCellularDiag(&parameters) != CellSuccess )
+        {
+            DBGE("Failed to query cell diagnostic data");
             return;
         }
+    }
 
-        //Read message to append
-        if( xQueueReceive( xCellQueue, &( cell_msg ), ( TickType_t ) 100 ) == pdTRUE )
+    /* Ensure new fix by change in timestamp */
+    if(parameters.fixTime == prevFixTime && parameters.gtpLatFloat == 0 || status == false){
+        DBGE("No new fix detected");
+        return;
+    }
+
+    //Set up compact payload
+    epcp_builder_agora agora_compact_payload;
+    epcp_builder_agora_init(&agora_compact_payload);
+
+    //Set up data converter
+    union epcp_convert_type ct;
+
+    // Increment frame counter
+    frameCounter = (uint8_t) (frameCounter + 1);
+
+    // Get time for data packet
+    uint64_t ts = get_time_s();
+
+    agora_add_data(&agora_compact_payload, EPCP_SYSTEM_V2, EPCP_VER, &epcp_ver);
+    agora_add_data(&agora_compact_payload, EPCP_SYSTEM_V2, EPCP_MSG_CNT, &frameCounter);
+    agora_add_data(&agora_compact_payload, EPCP_SYSTEM_V2, EPCP_TIME, &ts);
+    ct.ui32 = ep_bsp_read_battery_voltage() * 100;
+    agora_add_data(&agora_compact_payload, EPCP_SYSTEM_V2, EPCP_BATT, &(ct.ui32));
+
+    //Add Cell data to subpacket
+    char* endptr;
+    uint64_t hexIMEI = strtoull(parameters.imei,&endptr,10); //Convert IMEI from string to number
+    agora_add_data(&agora_compact_payload, EPCP_CELL, EPCP_IMEI, &(hexIMEI));
+    agora_add_data(&agora_compact_payload, EPCP_CELL, EPCP_RSSI, &(parameters.rssi));
+    agora_add_data(&agora_compact_payload, EPCP_CELL, EPCP_RSRQ, &(parameters.rsrq));
+
+    if(parameters.fixTime != prevFixTime || status == false){
+        //Add satellites
+        agora_add_data(&agora_compact_payload, EPCP_GNSS, EPCP_SAT, &(parameters.satellites));
+        //If failed fix then set values to 0
+        if(parameters.fix < 2){
+            parameters.lat_float = 0;
+            parameters.long_float = 0;
+            agora_set_error(&agora_compact_payload,EPCP_GNSS,true);
+        }
+        //Add GNSS data to subpacket    
+        prevFixTime = parameters.fixTime;
+        //Convert LAT from float to int per spec
+        ct.i32 = parameters.lat_float * 100000;
+        agora_add_data(&agora_compact_payload, EPCP_GNSS, EPCP_LAT, &(ct.ui32));
+        //Convert LON from float to int per spec
+        ct.i32 = parameters.long_float * 100000;
+        agora_add_data(&agora_compact_payload, EPCP_GNSS, EPCP_LON, &(ct.ui32));
+    }
+
+    //Add GTP data to subpacket
+    if(parameters.gtpLatFloat != 0){
+        //Convert LAT from float to int per spec
+        ct.i32 = parameters.gtpLatFloat * 100000;
+        agora_add_data(&agora_compact_payload, EPCP_GTP, EPCP_GTP_LAT, &(ct.ui32));
+        //Convert LON from float to int per spec
+        ct.i32 = parameters.gtpLongFloat * 100000;
+        agora_add_data(&agora_compact_payload, EPCP_GTP, EPCP_GTP_LON, &(ct.ui32));
+        //Add accuracy
+        ct.i32 = parameters.gtpAccuracy * 100;
+        agora_add_data(&agora_compact_payload, EPCP_GTP, EPCP_GTP_ACC, &(ct.ui32));
+        //Clear data
+        parameters.gtpLatFloat = 0;
+    }
+
+    //Generate completed packet
+    cell_queue_msg gnss_data_msg;
+    gnss_data_msg.size = agora_get_packet(&agora_compact_payload, gnss_data_msg.data);   
+
+    // Add new queue entry
+    if(xQueueSend(xCellQueue, &gnss_data_msg, CELL_QUEUE_TIMEOUT) != pdTRUE){
+        DBGE("Queue Timeout!");
+    }
+
+    //Free message
+    epcp_builder_agora_deinit(&agora_compact_payload);            
+}
+
+/*-----------------------------------------------------------*/
+void parse_downlink(void){
+    // String for get app attributes
+    char sharedAppAttr[MAX_ATTR_VALUE_LENGTH] = {'\0'};
+    for( uint8_t attribute = 0; attribute < num_HTTP_ATTRIBUTES; attribute++ )
+    {
+        getAttributes(attribute,sharedAppAttr);
+        // Check if attribute value is valid
+        if(sharedAppAttr[0] != '\0')
         {
-            cellDiag parameters = {'\0'};
-            //Get latest cell values
-            if( queryCellularDiag(&parameters) != CELLULAR_SUCCESS )
-            {
-                /* retry once */
-                if( queryCellularDiag(&parameters) != CELLULAR_SUCCESS )
+            //DBGE("%d, %s", attribute, sharedAppAttr);
+            vTaskDelay(pdMS_TO_TICKS(10));
+            switch(attribute){
+
+                // Handle transmission interval update
+                case 0:
                 {
-                    DBGE("Failed to query cell diagnostic data");
-                    return;
+                    cellTransInt = ( uint32_t ) strtoul( sharedAppAttr, NULL, 10 );
+                    DBGI("New sample interval: %ds", cellTransInt);
+                }break;
+
+                default:
+                {
+                    //DBGW("Undefined attribute!");
                 }
             }
-
-
-            //Set up compact payload
-            epcp_builder_agora agora_compact_payload;
-            epcp_builder_agora_init(&agora_compact_payload);
-
-            //Print GNSS data to debug log
-            DBGI("Lat:%f,Long:%f",parameters.lat_float,parameters.long_float);
-           
-            //Set up data converter
-            union epcp_convert_type ct;
-
-            //Add GNSS data to subpacket
-            if(parameters.fixTime != prevFixTime){           
-                prevFixTime = parameters.fixTime;
-                //Convert LAT from float to int per spec
-                ct.i32 = parameters.lat_float * 10000;
-                agora_add_data(&agora_compact_payload, EPCP_GNSS, EPCP_LAT, &(ct.ui32));
-
-                //Convert LON from float to int per spec
-                ct.i32 = parameters.long_float * 10000;
-                agora_add_data(&agora_compact_payload, EPCP_GNSS, EPCP_LON, &(ct.ui32));
-            }
-
-            //Generate completed packet
-            cell_queue_msg gnss_sensor_data_msg;
-            gnss_sensor_data_msg.size = agora_get_packet(&agora_compact_payload, gnss_sensor_data_msg.data);
-
-            // Generate combined packet */
-            cell_queue_msg combined_sensor_data_msg;
-
-            memcpy(&combined_sensor_data_msg.data[0],&cell_msg.data[0],cell_msg.size);
-            memcpy(&combined_sensor_data_msg.data[cell_msg.size],&gnss_sensor_data_msg.data[0],gnss_sensor_data_msg.size);
-
-            combined_sensor_data_msg.size = ((cell_msg.size)+(gnss_sensor_data_msg.size));
-
-            //Its possible to miss gnss fix if cell service is unable for an extended period and will retry on next gnss interval
-            if(xQueueSendToFront(xCellQueue, &combined_sensor_data_msg, CELL_QUEUE_TIMEOUT) != pdTRUE){
-                DBGE("Queue Timeout!");
-            }
-
-            //Free message
-            epcp_builder_agora_deinit(&agora_compact_payload);            
         }
     }
 }
