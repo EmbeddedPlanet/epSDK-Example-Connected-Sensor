@@ -277,32 +277,27 @@ void CellularTask( void * pvParameters )
             vTaskSuspend( ledTaskHandle );
             // Enable debug out for LED
             led_pause();
+
+            // If the cell fails for any reason, we switch over to LoRa if active as a primary or backup. Else we wait and try again over cell.
+            if (cellStatus != CellSuccess || comm_conf == COMM_LORA_ONLY){                
+                if((comm_conf == COMM_CELL_PRIMARY_LORA_BACKUP) || (comm_conf == COMM_LORA_PRIMARY_CELL_BACKUP) || (comm_conf == COMM_LORA_ONLY)){
+                    //Transmission failed and LoRa is set as primary or backup. Dump failed cell queue into LoRa queue.
+                    if(comm_conf != COMM_LORA_ONLY){
+                        DBGW("Cellular transmission failed! Switching to LoRa backup.");
+                    }
+                    lora_queue_msg lora_msg;
+                    while(xQueueReceive(xCellQueue, &lora_msg, 0) == pdTRUE){
+                        //Forward data to LoRa queue if there is space
+                        if(xQueueSend(xLoraQueue, &lora_msg, CELL_QUEUE_TIMEOUT) != pdTRUE){
+                            DBGE("Lora queue Timeout!");
+                        }
+                    }
+                }
+            }
+
         }
         /* Delay between checking queue*/
         vTaskDelay(pdMS_TO_TICKS(5000));
-    }
-    vTaskDelete( NULL );
-}
-
-/*-----------------------------------------------------------*/
-void mqttTask( void * pvParameters )
-{
-    for(;;)
-    {
-        /* Periodically check status to see if mqtt connection can be closed */
-        CellStatus_t ret = statusMQTTCellular(IOT_BROKER_ADDRESS_POST);
-
-        /* If Success then close, otherwise wait and check again */
-        if( ret == CellSuccess ){
-            DBGI("MQTT ready to be closed");
-            if( closeMQTTCellular() != CellSuccess){
-                DBGE("Fail to close MQTT connection");
-            }
-            /* Suspend task */
-            vTaskSuspend( NULL );
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(10000));    
     }
     vTaskDelete( NULL );
 }

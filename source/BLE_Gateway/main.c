@@ -1,29 +1,13 @@
-/****************************************************************************                                                                     *
- * Copyright (c) 2026 Embedded Planet, Inc.                                 *
- * SPDX-License-Identifier: Apache-2.0                                      *
- *                                                                          *
- * Licensed under the Apache License, Version 2.0 (the "License");          *
- * you may not use this file except in compliance with the License.         *
- * You may obtain a copy of the License at                                  *
- *                                                                          *
- *     http://www.apache.org/licenses/LICENSE-2.0                           *
- *                                                                          *
- * Unless required by applicable law or agreed to in writing, software      *
- * distributed under the License is distributed on an "AS IS" BASIS,        *
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. *
- * See the License for the specific language governing permissions and      *
- * limitations under the License.                                           *
- ****************************************************************************/
 /**
  * Created on: Sept 1, 2022
- * Created by: maherdan
+ * Created by: golobmichael
  * 
  * Copyright (c) Embedded Planet, Inc - All rights reserved
  *
  * This source file is private and confidential.
  * Unauthorized copying of this file is strictly prohibited.
  * 
- * Version 1.0 - 01SEPT22  Initial
+ * Version 1.0 - 01SEPT22  Initial, ported from: https://github.com/EmbeddedPlanet/nrf_sdk_17_1/tree/master/examples/ble_peripheral/ble_app_hrs_freertos, golobmichael
  */
 #include <stdint.h>
 #include <inttypes.h>
@@ -48,9 +32,12 @@
 #include "fds.h"
 #include "nrf_drv_clock.h"
 #include "uart_helper.h"
-#include "cell_helper.h"
+#include "cellular_common_api.h"
+#include "cellular_common.h"
+#include "cellular_comm_interface.h"
 #include "ep_ble_central.h"
 #include "epcp_builder_agora.h"
+#include "bme680.h"
 #include "htu21d.h"
 #include "icm20602.h"
 #include "qspi_helper.h"
@@ -66,17 +53,17 @@ QueueHandle_t xCellQueue;
 SemaphoreHandle_t xSensPwrEnSemaphore;
 
 TaskHandle_t ledTaskHandle;
-TaskHandle_t sensorSampleTaskHandle;
 TaskHandle_t cellularTaskHandle;
-TaskHandle_t mqttTaskHandle;
+TaskHandle_t sensorSampleTaskHandle;
 
 //Activate / deactivate onboard sensors
 #define SI7021_ACTIVE   1
+#define VL53L0X_ACTIVE  0
 #define BME680_ACTIVE   0
 #define ICM20602_ACTIVE 0
 
 #define mainLED_TASK_STACK_SIZE             128
-#define mainCell_TASK_STACK_SIZE            8196
+#define mainCell_TASK_STACK_SIZE            4500
 #define DEAD_BEEF                           0xDEADBEEF                              /**< Value used as error code on stack dump, can be used to identify stack location on stack unwind. */
 #define OSTIMER_WAIT_FOR_QUEUE              2                                       /**< Number of ticks to wait for the timer queue to be ready */
 #define CELL_QUEUE_TIMEOUT                  pdMS_TO_TICKS(3000)                     /** Time to wait on queue before moving on to the next sample */
@@ -86,8 +73,7 @@ TaskHandle_t mqttTaskHandle;
 ICM20602 icm;
 #endif
 
-// Frame counter for payload
-static uint8_t frameCounter = 0;
+CellStatus_t cell_status;
 
 system_info_struct system_info;
 
@@ -102,6 +88,10 @@ static const nrfx_twi_t twi = NRFX_TWI_INSTANCE(TWI_INSTANCE_ID);
 
 /* Initial PDP config */
 CellularBLEConfig_t pdnConfig = { '\0' };
+CellularBLEConfig_t pdnConfigDefault = { '\0' };
+
+// Frame counter for payload
+static uint8_t frameCounter = 0;
 
 /* TWI initialization */
 void twi_init (void)
@@ -130,6 +120,9 @@ static void prvMiscInitialization( void );
 
 /* Helper function for making received Agora version numbers more readable */
 static void parse_version(char* version, char* conv_fw_ver);
+
+/* Parse downlink attributes */
+void parse_downlink(void);
 
 /*-----------------------------------------------------------*/
 static void LEDTask( void * pvParameters )
@@ -271,7 +264,7 @@ static void prvMiscInitialization( void )
         system_info.updateVerMaj = ( ( xDescriptor.updateVersion >> 24 ) & 0xFF );
         system_info.updateVerMin = ( ( xDescriptor.updateVersion >> 16 ) & 0xFF );
         system_info.updateVerBui = ( xDescriptor.updateVersion & 0xFFFF );
-        sprintf( system_info.updateVerStr,"%02x.%02x.%02x", system_info.updateVerMaj, system_info.updateVerMin, system_info.updateVerBui );
+        sprintf( system_info.updateVerStr,"%02d.%02d.%02ld", system_info.updateVerMaj, system_info.updateVerMin, system_info.updateVerBui );
     }
     else
     {
@@ -280,7 +273,7 @@ static void prvMiscInitialization( void )
         system_info.updateVerMin = VERSION_MINOR;
         system_info.updateVerBui = VERSION_BUILD;
         /* Set string version */
-        sprintf( system_info.updateVerStr,"%02x.%02x.%02x", system_info.updateVerMaj, system_info.updateVerMin, system_info.updateVerBui );
+        sprintf( system_info.updateVerStr,"%02d.%02d.%02ld", system_info.updateVerMaj, system_info.updateVerMin, system_info.updateVerBui );
     }
 
     /* Read production table in external flash */
@@ -304,6 +297,23 @@ static void prvMiscInitialization( void )
         }
     }
 
+    /* Read ble settings table in external flash */
+    err_code = qspi_read( (uint8_t * ) &pdnConfig, sizeof(pdnConfig), otapal_BLE_TBL_START );
+    /* If error or invalid then use defaults */
+    //if( err_code != NRFX_SUCCESS )
+    //{
+    //    DBGE( "BLE Settings Table read failed with with error code %d", err_code );
+
+        strncpy(pdnConfig.apnName, pdnConfigDefault.apnName, sizeof(pdnConfigDefault.apnName));
+    //    DBGI("Resetting to defaults: APN: %s", pdnConfig.apnName);
+    //}
+    //else
+    //{
+        /* Display values read */
+        DBGI("Cell APN: %s, %d", pdnConfig.apnName, strlen(pdnConfig.apnName));
+    //}
+
+
     DBGI("***************************************************");
     DBGI("*       Embedded Planet: BLE CENTRAL v%s    *", system_info.updateVerStr);
     DBGI("***************************************************");
@@ -316,7 +326,8 @@ static void prvMiscInitialization( void )
                 NULL, 
                 tskIDLE_PRIORITY+2,
                 NULL);
-#endif
+
+#if ENABLE_LED_OPERATION
     /* Create the task to run tests. */
     xTaskCreate( LEDTask,
                 "LEDTask",
@@ -324,7 +335,10 @@ static void prvMiscInitialization( void )
                 NULL,
                 tskIDLE_PRIORITY+1,
                 &ledTaskHandle );
+#endif
+#endif
 
+    #if CELLULAR_ACTIVE
     /* Cell needs a couple of seconds before starting */
     nrf_delay_ms(2000);
 
@@ -349,26 +363,16 @@ static void prvMiscInitialization( void )
     }
     #endif
 
-    #if defined(AZURE_MQTTS_X509) || defined(AWS_MQTTS_X509)|| defined(AZURE_MQTTS_SAS)
-    //If protocol is MQTT and persistent then create task to manage connection
-    if( PERSISTENT_CONNECT_FLAG == false )
-    {
-        xTaskCreate( mqttTask,
-                    "mqttTask",
-                    MQTT_TASK_STACK_SIZE,
-                    NULL,
-                    tskIDLE_PRIORITY+2,
-                    &mqttTaskHandle );
-    }
-    #endif
-
     /* Create the task to run tests. */
     xTaskCreate( CellularTask,
                 "CellularTask",
                 mainCell_TASK_STACK_SIZE,
                 NULL,
                 tskIDLE_PRIORITY+2,
-                NULL );
+                &cellularTaskHandle );
+#endif     
+
+    qspi_uninit();
 
 #if BLE_ACTIVE
     DBGI( ( "BLE Task Initializing .\r\n" ) );
@@ -383,6 +387,9 @@ static void prvMiscInitialization( void )
 void sensorSampleTask(void *pvParameters)
 {
     nrfx_err_t err;
+    
+    // Frame counter for payload
+    static uint8_t frameCounter = 0;
 
     init_uart(TASK_1);
 
@@ -413,36 +420,18 @@ void sensorSampleTask(void *pvParameters)
         cellDiag parameters = {'\0'};
         if( queryCellularDiag(&parameters) != CellSuccess )
         {
-            /* Keep trying if unable to attain values */
+            /* Do not send if unable to attain values */
             continue;
         }
-
-        //Loop and give time for IMEI during power up
-        uint8_t loopCnt = 0;
-        DBGI("Waiting for IMEI to be received");
-        while( parameters.imei[0] == 0 && parameters.imei[15] == 0 )
-        {
-            vTaskDelay(pdMS_TO_TICKS(500));
-            queryCellularDiag(&parameters);
-            loopCnt++;
-            if(loopCnt > 240)
-            {
-                break;
-            }
-        }
-        //Cannot send data on this loop if IMEI is unavailable
-        if(loopCnt > 240)
-        {
-            DBGE("No IMEI to receive");
-            continue;
-        }
-        DBGI("IMEI received");
         
         //Get current time. In seconds if we have already synced time via cellular or GNSS. If not, this represents the run time of the system.
         uint32_t ts = get_time_s();
 
-        //Increment frame counter or roll over if needed
-        frameCounter = (uint8_t) (frameCounter + 1);
+        //Set and adjust transmission frame counter
+        if(frameCounter >= 0xFF){
+            frameCounter = 0;
+        }
+        frameCounter++;
 
         //Get SI7021 data if active and available
         float si_temp, si_hum;
@@ -455,9 +444,9 @@ void sensorSampleTask(void *pvParameters)
             htu21_read_temperature_and_relative_humidity(&si_temp, &si_hum);
         #endif
 
+        //Get BME680 data if active and available
+        bme680_sensor_data bme_data; 
         #if BME680_ACTIVE == 1
-            //Get BME680 data if active and available
-            bme680_sensor_data bme_data; 
             DBGW("BME get semaphore");
             if(xSemaphoreTake(xBme680DataReadySemaphore, pdMS_TO_TICKS(5000))){
                 bme_data = bme680_get_latest_data();\
@@ -566,11 +555,6 @@ void sensorSampleTask(void *pvParameters)
 
         // Set flag
         newDataAdded = true;
-
-        // Resume mqtt task
-        if(strstr( IOT_BROKER_ADDRESS_POST, "mqtt" ) != NULL && PERSISTENT_CONNECT_FLAG != true){
-            vTaskResume( mqttTaskHandle );
-        }
 
         parse_downlink();
 
