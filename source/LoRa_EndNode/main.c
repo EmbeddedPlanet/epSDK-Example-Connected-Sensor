@@ -57,8 +57,7 @@
 #include "led_helper.h"
 #include "time_helper.h"
 #include "cell_helper.h"
-#include "compact_payload_config.h"
-#include "epcp_builder_agora.h"
+#include "compact_payload.h"
 #include "LoRaWAN.h"
 
 //Activate / deactivate onboard sensors
@@ -278,7 +277,7 @@ static void prvMiscInitialization( void )
         system_info.updateVerMaj = ( ( xDescriptor.updateVersion >> 24 ) & 0xFF );
         system_info.updateVerMin = ( ( xDescriptor.updateVersion >> 16 ) & 0xFF );
         system_info.updateVerBui = ( xDescriptor.updateVersion & 0xFFFF );
-        sprintf( system_info.updateVerStr,"%02d.%02d.%02ld", system_info.updateVerMaj, system_info.updateVerMin, system_info.updateVerBui );        
+        sprintf( system_info.updateVerStr,"%02x.%02x.%02x", system_info.updateVerMaj, system_info.updateVerMin, system_info.updateVerBui );        
     }
     else
     {
@@ -287,7 +286,7 @@ static void prvMiscInitialization( void )
         system_info.updateVerMin = VERSION_MINOR;
         system_info.updateVerBui = VERSION_BUILD;
         // Set string version
-        sprintf( system_info.updateVerStr,"%02d.%02d.%02ld", system_info.updateVerMaj, system_info.updateVerMin, system_info.updateVerBui );
+        sprintf( system_info.updateVerStr,"%02d.%02d.%02d", system_info.updateVerMaj, system_info.updateVerMin, system_info.updateVerBui );
     }
 
     // Read production table in external flash
@@ -390,179 +389,173 @@ static void prvMiscInitialization( void )
 void sensorSampleTask(void *pvParameters)
 {
     nrfx_err_t err;
-    
-    // Frame counter for payload
     static uint8_t frameCounter = 0;
-
-    init_uart(TASK_1);
-
-    //Enable sensor power        
-    DBGI("Sensor power on");
-    sensorPwrEnConfig(true);
-    vTaskDelay(pdMS_TO_TICKS(20));
-
-    //Init nRF TWI interface
-    twi_init();
-
-    //Small delay needed after twi/spi init before communication can begin
-    vTaskDelay(pdMS_TO_TICKS(20));
-
-    //Sensor initializations
-    #if BME680_ACTIVE == 1
-    bme680_init(twi, BSEC_SAMPLE_RATE_LP, 0.0f);
-    #endif
-    #if ICM20602_ACTIVE == 1
-    icm20602_init(&icm, ICM20602_ADDR_LOW, twi);
-    #endif
-
+    
     while(1){
-        // Display heap usage
+        init_uart(TASK_1);                
+
+        //Init nRF TWI interface
+        twi_init();
+
+        //Small delay needed after twi/spi init before communication can begin
+        vTaskDelay(pdMS_TO_TICKS(20));
+        
+        //Enable sensor power        
+        DBGI("Sensor power on");
+        sensorPwrEnConfig(true);
+        vTaskDelay(pdMS_TO_TICKS(250));
+
         DBGI("FreeRTOS Heap Space: %ld",xPortGetFreeHeapSize());
+
+        #if ICM20602_ACTIVE == 1
+        icm20602_init(&icm, ICM20602_ADDR_LOW, twi);
+        #endif
         
         //Get current time. In seconds if we have already synced time via cellular or GNSS. If not, this represents the run time of the system.
         uint32_t ts = get_time_s();
 
-        //Set and adjust transmission frame counter
-        if(frameCounter >= 0xFF){
-            frameCounter = 0;
-        }
-        frameCounter++;
+        //Increment frame counter or roll over if needed
+        frameCounter = (uint8_t) (frameCounter + 1);
 
         //Get SI7021 data if active and available
         float si_temp, si_hum;
         #if SI7021_ACTIVE == 1
-            htu21_init(twi);
-            err = htu21_is_connected();
-            if(err != NRFX_SUCCESS){
-                DBGW("SI7021 data not available!");
-            }
-            htu21_read_temperature_and_relative_humidity(&si_temp, &si_hum);
+        htu21_init(twi);
+        err = htu21_is_connected();
+        if(err != NRFX_SUCCESS){
+            DBGW("SI7021 data not available!");
+        }
+        htu21_read_temperature_and_relative_humidity(&si_temp, &si_hum);
         #endif
 
         //Get BME680 data if active and available
         bme680_sensor_data bme_data; 
         #if BME680_ACTIVE == 1
-            DBGW("BME get semaphore");
-            if(xSemaphoreTake(xBme680DataReadySemaphore, pdMS_TO_TICKS(5000))){
-                bme_data = bme680_get_latest_data();\
-            }else{
-                DBGW("BME680 data not available!");
-            }
+        bme680_init(twi, BSEC_SAMPLE_RATE_LP, 0.0f);
+        //Get new BME680 data if available
+        if(xSemaphoreTake(xBme680DataReadySemaphore, pdMS_TO_TICKS(5000))){
+            bme_data = bme680_get_latest_data();
+        }else{
+            DBGI("BME680 data not available!");
+        }
+        vTaskDelete(bme_thread_data);
         #endif
 
         //Get icm20602 data if active and available
         icm20602_sensor_data icm_data;
+        int errFlag;
         #if ICM20602_ACTIVE == 1
-            //Get new ICM20602 data if available
-            bool icm_data_ready = icm20602_data_ready(&icm, &err);
-            if(icm_data_ready){
-                icm_data = icm20602_get_data(&icm, &err); 
-            }else{
-                DBGW("ICM20602 data not available!");
-            }
+        //Get new ICM20602 data if available
+        bool icm_data_ready = icm20602_data_ready(&icm, &errFlag);
+        if(icm_data_ready){
+            icm_data = icm20602_get_data(&icm, &errFlag); 
+        }else{
+            DBGW("ICM20602 data not available!");
+        }
         #endif
 
         //Get VLXL0X data if active and available
         VL53L0X tof;
         #if VL53L0X_ACTIVE == 1
-            err = vl53l0x_init(&tof, twi);
-            if(err != NRFX_SUCCESS){
-                DBGE("VL53L0X init error!");
-            }
-            //Set the tof timing budget to 200ms
-            setMeasurementTimingBudget(&tof, 200000);
+        errFlag = vl53l0x_init(&tof, twi);
+        if(errFlag != NRFX_SUCCESS){
+            DBGE("VL53L0X init error!");
+        }
+        //Set the tof timing budget to 200ms
+        setMeasurementTimingBudget(&tof, 200000);
         #endif
 
+        //Set up data converter
+        union epcp_convert_type ct;
+
         //Set up compact payload
-        epcp_builder_agora agora_compact_payload;
-        epcp_builder_agora_init(&agora_compact_payload);
+        compact_payload_init();
 
         //Add System data to subpacket
+        uint8_t epcp_ver = EPCP_VERSION;
         //Convert battery from float to int per spec
-        uint32_t batVolt = ep_bsp_read_battery_voltage() * 100;
-        uint8_t epcpVer = EPCP_VERSION;
+        ct.ui32 = ep_bsp_read_battery_voltage() * 100;
         if(frameCounter == 1){
-            agora_add_data(&agora_compact_payload, EPCP_SYSTEM, EPCP_VER, &epcpVer);
-            agora_add_data(&agora_compact_payload, EPCP_SYSTEM, EPCP_FW_MAJOR, &system_info.updateVerMaj);
-            agora_add_data(&agora_compact_payload, EPCP_SYSTEM, EPCP_FW_MINOR, &system_info.updateVerMin);
-            agora_add_data(&agora_compact_payload, EPCP_SYSTEM, EPCP_FW_PATCH, &system_info.updateVerBui);
-            agora_add_data(&agora_compact_payload, EPCP_SYSTEM, EPCP_MSG_CNT, &frameCounter);
-            agora_add_data(&agora_compact_payload, EPCP_SYSTEM, EPCP_SN, system_info.ep_serial);
-            agora_add_data(&agora_compact_payload, EPCP_SYSTEM, EPCP_TIME, &ts);
-            agora_add_data(&agora_compact_payload, EPCP_SYSTEM, EPCP_BATT, &batVolt);
+            compact_payload_add_data(EPCP_SYSTEM_FULL, EPCP_VER, &epcp_ver);
+            compact_payload_add_data(EPCP_SYSTEM_FULL, EPCP_FW_MAJOR, &system_info.updateVerMaj);
+            compact_payload_add_data(EPCP_SYSTEM_FULL, EPCP_FW_MINOR, &system_info.updateVerMin);
+            compact_payload_add_data(EPCP_SYSTEM_FULL, EPCP_FW_PATCH, &system_info.updateVerBui);
+            compact_payload_add_data(EPCP_SYSTEM_FULL, EPCP_MSG_CNT, &frameCounter);
+            compact_payload_add_data(EPCP_SYSTEM_FULL, EPCP_SN, system_info.ep_serial);
+            compact_payload_add_data(EPCP_SYSTEM_FULL, EPCP_TIME, &ts);
+            compact_payload_add_data(EPCP_SYSTEM_FULL, EPCP_BATT, &(ct.ui32));
         }else{
-            agora_add_data(&agora_compact_payload, EPCP_SYSTEM_V2, EPCP_VER, &epcpVer);
-            agora_add_data(&agora_compact_payload, EPCP_SYSTEM_V2, EPCP_MSG_CNT, &frameCounter);
-            agora_add_data(&agora_compact_payload, EPCP_SYSTEM_V2, EPCP_TIME, &ts);
-            agora_add_data(&agora_compact_payload, EPCP_SYSTEM_V2, EPCP_BATT, &batVolt);
+            compact_payload_add_data(EPCP_SYSTEM_CONDENSED, EPCP_VER, &epcp_ver);
+            compact_payload_add_data(EPCP_SYSTEM_CONDENSED, EPCP_MSG_CNT, &frameCounter);
+            compact_payload_add_data(EPCP_SYSTEM_CONDENSED, EPCP_TIME, &ts);
+            compact_payload_add_data(EPCP_SYSTEM_CONDENSED, EPCP_BATT, &(ct.ui32));
         }
 
         //Add HTU21D / SI7021 data to subpacket
         #if SI7021_ACTIVE == 1
-            //Convert TEMP to int per spec
-            int32_t temperature = si_temp * 100;
-            agora_add_data(&agora_compact_payload, EPCP_SI7021, EPCP_TEMP, &temperature);
-            //Convert HUM to int per spec
-            int32_t humidity = si_hum * 100;
-            agora_add_data(&agora_compact_payload, EPCP_SI7021, EPCP_HUM, &humidity);
+        //Convert TEMP to int per spec
+        ct.i32 = si_temp * 100;
+        compact_payload_add_data(EPCP_SI7021, EPCP_TEMP, &(ct.ui32));
+        //Convert HUM to int per spec
+        ct.i32 = si_hum * 100;
+        compact_payload_add_data(EPCP_SI7021, EPCP_HUM, &(ct.ui32));
         #endif
 
         //Add BME680 data to subpacket
         #if BME680_ACTIVE == 1
-            int32_t bmeTemp = bme_data.temp * 100;
-            agora_add_data(&agora_compact_payload, EPCP_BME680, EPCP_TEMP, &bmeTemp);
-            int32_t bmePress = bme_data.raw_pressure * 100;
-            agora_add_data(&agora_compact_payload, EPCP_BME680, EPCP_PRES, &bmePress);
-            uint32_t bmeHumid = bme_data.humidity * 100;
-            agora_add_data(&agora_compact_payload, EPCP_BME680, EPCP_HUM, &bmeHumid);
-            uint32_t bmeGas = bme_data.raw_gas * 100;
-            agora_add_data(&agora_compact_payload, EPCP_BME680, EPCP_GAS, &bmeGas);
-            uint32_t bmeCO2 = bme_data.co2_equivalent * 100;
-            agora_add_data(&agora_compact_payload, EPCP_BME680, EPCP_CO2, &bmeCO2);
-            uint32_t bmeVOC = bme_data.breath_voc_equivalent * 100;
-            agora_add_data(&agora_compact_payload, EPCP_BME680, EPCP_BREATH, &bmeVOC);
-            uint32_t bmeIAQ = bme_data.iaq;
-            agora_add_data(&agora_compact_payload, EPCP_BME680, EPCP_IAQ_SCORE, &bmeIAQ);
-            uint32_t bmeIAQAcc = bme_data.iaq_accuracy;
-            agora_add_data(&agora_compact_payload, EPCP_BME680, EPCP_IAQ_ACCURACY, &bmeIAQAcc);
+        ct.i32 = bme_data.temp * 100;
+        compact_payload_add_data(EPCP_BME680, EPCP_TEMP, &(ct.ui32));
+        ct.i32 = bme_data.raw_pressure * 100;
+        compact_payload_add_data(EPCP_BME680, EPCP_PRES, &(ct.ui32));
+        ct.ui32 = bme_data.humidity * 100;
+        compact_payload_add_data(EPCP_BME680, EPCP_HUM, &(ct.ui32));
+        ct.ui32 = bme_data.raw_gas * 100;
+        compact_payload_add_data(EPCP_BME680, EPCP_GAS, &(ct.ui32));
+        ct.ui32 = bme_data.co2_equivalent * 100;
+        compact_payload_add_data(EPCP_BME680, EPCP_CO2, &(ct.ui32));
+        ct.ui32 = bme_data.breath_voc_equivalent * 100;
+        compact_payload_add_data(EPCP_BME680, EPCP_BREATH, &(ct.ui32));
+        ct.ui32 = bme_data.iaq;
+        compact_payload_add_data(EPCP_BME680, EPCP_IAQ_SCORE, &(ct.ui32));
+        ct.ui32 = bme_data.iaq_accuracy;
+        compact_payload_add_data(EPCP_BME680, EPCP_IAQ_ACCURACY, &(ct.ui32));
         #endif
 
         //Add ICM20602 data to subpacket
         #if ICM20602_ACTIVE == 1
-            int32_t accelX = icm_data.accel_x * 100;
-            agora_add_data(&agora_compact_payload, EPCP_ICM20602, EPCP_ACCEL_X, &accelX);
-            int32_t accelY = icm_data.accel_y * 100;
-            agora_add_data(&agora_compact_payload, EPCP_ICM20602, EPCP_ACCEL_Y, &accelY);
-            int32_t accelZ = icm_data.accel_z * 100;
-            agora_add_data(&agora_compact_payload, EPCP_ICM20602, EPCP_ACCEL_Z, &accelZ);
-            int32_t gyroX = icm_data.gyro_x * 100;
-            agora_add_data(&agora_compact_payload, EPCP_ICM20602, EPCP_GYRO_X, &gyroX);
-            int32_t gyroY = icm_data.gyro_y * 100;
-            agora_add_data(&agora_compact_payload, EPCP_ICM20602, EPCP_GYRO_Y, &gyroY);
-            int32_t gyroZ = icm_data.gyro_z * 100;
-            agora_add_data(&agora_compact_payload, EPCP_ICM20602, EPCP_GYRO_Z, &gyroZ);
+        ct.i32 = icm_data.accel_x * 100;
+        compact_payload_add_data(EPCP_ICM20602, EPCP_ACCEL_X, &(ct.ui32));
+        ct.i32 = icm_data.accel_y * 100;
+        compact_payload_add_data(EPCP_ICM20602, EPCP_ACCEL_Y, &(ct.ui32));
+        ct.i32 = icm_data.accel_z * 100;
+        compact_payload_add_data(EPCP_ICM20602, EPCP_ACCEL_Z, &(ct.ui32));
+        ct.i32 = icm_data.gyro_x * 100;
+        compact_payload_add_data(EPCP_ICM20602, EPCP_GYRO_X, &(ct.ui32));
+        ct.i32 = icm_data.gyro_y * 100;
+        compact_payload_add_data(EPCP_ICM20602, EPCP_GYRO_Y, &(ct.ui32));
+        ct.i32 = icm_data.gyro_z * 100;
+        compact_payload_add_data(EPCP_ICM20602, EPCP_GYRO_Z, &(ct.ui32));
         #endif
 
         //Add VL53L0X data to subpacket
         #if VL53L0X_ACTIVE == 1
-            uint32_t vl5310_data = vl53l0x_get_data(&tof, &err);
-            if(err != NRFX_SUCCESS){
-                DBGE("VL53L0X init error!");
-            }
-            agora_add_data(&agora_compact_payload, EPCP_VL53L0X, EPCP_DIST, &vl5310_data);
+        ct.ui32 = vl53l0x_get_data(&tof, &errFlag);
+        if(errFlag != NRFX_SUCCESS){
+            DBGE("VL53L0X init error!");
+        }
+        compact_payload_add_data(EPCP_VL53L0X, EPCP_DIST, &(ct.ui32));
         #endif
 
         //Generate completed packet
-        lora_queue_msg local_sensor_data_msg;
-        local_sensor_data_msg.size  = agora_get_packet(&agora_compact_payload, local_sensor_data_msg.data); 
+        cell_queue_msg local_sensor_data_msg;
+        local_sensor_data_msg.size  = compact_payload_get_packet(local_sensor_data_msg.data);
 
         //Forward data to cell queue if there is space
         if(xQueueSend(xLoraQueue, &local_sensor_data_msg, LORA_QUEUE_TIMEOUT) != pdTRUE){
             DBGE("LoRa queue Timeout!");
         }
 
-        //Deinit the compact payload and put the task to sleep
-        epcp_builder_agora_deinit(&agora_compact_payload);
+        //Put the task to sleep
         vTaskDelay(pdMS_TO_TICKS(loraTransInt * 1000));
     }
 }

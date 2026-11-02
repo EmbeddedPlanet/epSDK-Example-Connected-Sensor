@@ -53,18 +53,11 @@
 #include "led_helper.h"
 #include "ep_ble_peripheral.h"
 #include "qspi_helper.h"
+#include "time_helper.h"
 #include "cell_helper.h"
 #include "bme680.h"
 #include "icm20602.h"
-
-#include "compact_payload_config.h"
-#include "epcp_builder_agora.h"
-
-/* Firmware version information */
-#define VERSION_NUM "00.00.03"
-#define MAJOR_FW    "00"
-#define MINOR_FW    "00"
-#define PATCH_FW    "03"
+#include "compact_payload.h"
 
 /* GATT Spec version information */
 #define MAJOR_GATT  "00"
@@ -120,7 +113,7 @@ void sensor_sample_callback(){
 void app_loop(void *pvParameters){
     init_uart(TASK_1);
     DBGI("******************************************************");
-    DBGI("*       Embedded Planet: BLE PERIPHERAL v%s    *", VERSION_NUM);
+    DBGI("*       Embedded Planet: BLE PERIPHERAL v%s    *", system_info.updateVerStr);
     DBGI("******************************************************");
     uninit_uart(TASK_1);
     while(1){
@@ -138,9 +131,9 @@ void app_loop(void *pvParameters){
             memcpy(&system_data.gatt_v[0], MAJOR_GATT, sizeof(MAJOR_GATT));
             memcpy(&system_data.gatt_v[2], MINOR_GATT, sizeof(MINOR_GATT));
             memcpy(&system_data.gatt_v[4], PATCH_GATT, sizeof(PATCH_GATT));
-            memcpy(&system_data.firmware_v[0], MAJOR_FW, sizeof(MAJOR_FW));
-            memcpy(&system_data.firmware_v[2], MINOR_FW, sizeof(MINOR_FW));
-            memcpy(&system_data.firmware_v[4], PATCH_FW, sizeof(PATCH_FW));
+            memcpy(&system_data.firmware_v[0], VERSION_MAJOR, sizeof(VERSION_MAJOR));
+            memcpy(&system_data.firmware_v[2], VERSION_MINOR, sizeof(VERSION_MINOR));
+            memcpy(&system_data.firmware_v[4], VERSION_BUILD, sizeof(VERSION_BUILD));
             system_data.batt = ep_bsp_read_battery_voltage();
             ble_characteristic_update_system(&system_service, &system_data);
             #endif
@@ -214,6 +207,9 @@ int main(void){
     //Init uart for program output
     uart_helper.dbgi = true;
 
+    // Start lf clock
+    set_time(0);
+
     //Init LED to follow BLE advertising and button long push to restart the system
     led_init();
 
@@ -245,7 +241,7 @@ int main(void){
         system_info.updateVerMaj = ( ( xDescriptor.updateVersion >> 24 ) & 0xFF );
         system_info.updateVerMin = ( ( xDescriptor.updateVersion >> 16 ) & 0xFF );
         system_info.updateVerBui = ( xDescriptor.updateVersion & 0xFFFF );
-        sprintf( system_info.updateVerStr,"%02d.%02d.%02ld", system_info.updateVerMaj, system_info.updateVerMin, system_info.updateVerBui );
+        sprintf( system_info.updateVerStr,"%02x.%02x.%02x", system_info.updateVerMaj, system_info.updateVerMin, system_info.updateVerBui );
     }
     else
     {
@@ -254,7 +250,7 @@ int main(void){
         system_info.updateVerMin = VERSION_MINOR;
         system_info.updateVerBui = VERSION_BUILD;
         /* Set string version */
-        sprintf( system_info.updateVerStr,"%02d.%02d.%02ld", system_info.updateVerMaj, system_info.updateVerMin, system_info.updateVerBui );
+        sprintf( system_info.updateVerStr,"%02d.%02d.%02d", system_info.updateVerMaj, system_info.updateVerMin, system_info.updateVerBui );
     }
 
     /* Read production table in external flash */

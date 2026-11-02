@@ -1,13 +1,29 @@
+/****************************************************************************                                                                     *
+ * Copyright (c) 2026 Embedded Planet, Inc.                                 *
+ * SPDX-License-Identifier: Apache-2.0                                      *
+ *                                                                          *
+ * Licensed under the Apache License, Version 2.0 (the "License");          *
+ * you may not use this file except in compliance with the License.         *
+ * You may obtain a copy of the License at                                  *
+ *                                                                          *
+ *     http://www.apache.org/licenses/LICENSE-2.0                           *
+ *                                                                          *
+ * Unless required by applicable law or agreed to in writing, software      *
+ * distributed under the License is distributed on an "AS IS" BASIS,        *
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. *
+ * See the License for the specific language governing permissions and      *
+ * limitations under the License.                                           *
+ ****************************************************************************/
 /**
  * Created on: Sept 1, 2022
- * Created by: golobmichael
+ * Created by: danmaher
  * 
  * Copyright (c) Embedded Planet, Inc - All rights reserved
  *
  * This source file is private and confidential.
  * Unauthorized copying of this file is strictly prohibited.
  * 
- * Version 1.0 - 01SEPT22  Initial, ported from: https://github.com/EmbeddedPlanet/nrf_sdk_17_1/tree/master/examples/ble_peripheral/ble_app_hrs_freertos, golobmichael
+ * Version 1.0 - 01SEPT22  Initial
  */
 #ifndef __MAIN_H__
 #define __MAIN_H__
@@ -63,6 +79,25 @@ extern system_info_struct system_info;
 
 //////////////////////////////////////////////////
 /****                                        ****/
+/****            COMMUNICATION               ****/
+/****                                        ****/
+//////////////////////////////////////////////////
+
+/* Enum used to determine the transmission communication paths. */
+typedef enum e_comm_conf{
+    COMM_NONE,
+    COMM_CELL_ONLY,
+    COMM_LORA_ONLY,
+    COMM_CELL_PRIMARY_LORA_BACKUP,
+    COMM_LORA_PRIMARY_CELL_BACKUP,
+    COMM_CELL_PRIMARY_LORA_PRIMARY
+ } enum_comm_conf;
+
+ /* Set in application to one of the above communciation configurations */
+extern uint8_t comm_conf;
+
+//////////////////////////////////////////////////
+/****                                        ****/
 /****               CELLULAR                 ****/
 /****                                        ****/
 //////////////////////////////////////////////////
@@ -114,7 +149,7 @@ extern system_info_struct system_info;
 #define MODEM_SLEEP_STATE   MODEM_OFF
 
 /* Enable GTP Location Functional */
-#define GTP_STATUS          true
+#define GTP_STATUS          false
 
 /* MQTT Persistent Connection Flag */
 #define PERSISTENT_CONNECT_FLAG     false   // false: disconnect with empty queue, true: maintain connection
@@ -495,24 +530,6 @@ extern void CellularTask( void * pvParameters );
 /** < Time to wait on queue before moving on to the next sample */
 #define BLE_EPCP_QUEUE_TIMEOUT  pdMS_TO_TICKS(3000)
 
-
-//////////////////////////////////////////////////
-/****                                        ****/
-/****                BUTTON                  ****/
-/****                                        ****/
-//////////////////////////////////////////////////
-
-/* < Delay in ms for debouncing the button */
-#define DEBOUNCE_DELAY      pdMS_TO_TICKS(80)        
-
-/* < Upon button release, the timer is compared with this value to determine whether to trigger
-    the short button push callback or the long push callback */
-#define BTN_LONG_PUSH_DURATION          3000
-
-/* < The timer is compared with this value to determine whether to trigger the very long push callback*/
-#define BTN_VERY_LONG_PUSH_DURATION     10000 
-
-
 //////////////////////////////////////////////////
 /****                                        ****/
 /****                  LED                   ****/
@@ -522,7 +539,6 @@ extern void CellularTask( void * pvParameters );
 #define LED_CELL_OK             LED_SINGLE_BLINK
 #define LED_FAIL_TO_SEND        LED_DOUBLE_BLINK
 #define LED_FAIL_TO_REG         LED_TRIPLE_BLINK
-#define ENABLE_LED_OPERATION    true
 
 /** < Amount of time, in milliseconds, that the LED remains on during slow blinks*/
 #define LED_SLOW_BLINK_LENGTH               pdMS_TO_TICKS(1000)

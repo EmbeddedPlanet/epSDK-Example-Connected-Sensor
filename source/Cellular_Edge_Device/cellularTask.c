@@ -94,7 +94,7 @@ void CellularTask( void * pvParameters )
         cellStatus = CellGeneralFail;
         
         /* Wait for item in queue */
-        if(newDataAdded == true && xQueuePeek(xCellQueue, NULL, 0) == pdTRUE){
+        if(newDataAdded == true){
             /* Clear flag */
             newDataAdded = false;
             if(!first_run){
@@ -259,7 +259,7 @@ void CellularTask( void * pvParameters )
             }
             
             /* Run Thingsboard FOTA if detected, currently only supported on http */
-            if(fotaAvailable == true && ( IOT_BROKER_ADDRESS_GET, "thingsboard" ) != NULL && ( IOT_BROKER_ADDRESS_GET, "http://" ) != NULL){
+            if(fotaAvailable == true && strstr( IOT_BROKER_ADDRESS_GET, "thingsboard" ) != NULL && strstr( IOT_BROKER_ADDRESS_GET, "http://" ) != NULL){
                 runThingsboardFOTA(IOT_BROKER_ADDRESS_GET, SERVER_ADDR_PREFIX_GET, SERVER_ADDR_SUFFIX_FOTA);
             }
             else if(strstr( IOT_BROKER_ADDRESS_GET, "amazonaws" ) != NULL && strstr( IOT_BROKER_ADDRESS_POST, "mqtts://" ) != NULL){
@@ -277,24 +277,6 @@ void CellularTask( void * pvParameters )
             vTaskSuspend( ledTaskHandle );
             // Enable debug out for LED
             led_pause();
-
-            // If the cell fails for any reason, we switch over to LoRa if active as a primary or backup. Else we wait and try again over cell.
-            if (cellStatus != CellSuccess || comm_conf == COMM_LORA_ONLY){                
-                if((comm_conf == COMM_CELL_PRIMARY_LORA_BACKUP) || (comm_conf == COMM_LORA_PRIMARY_CELL_BACKUP) || (comm_conf == COMM_LORA_ONLY)){
-                    //Transmission failed and LoRa is set as primary or backup. Dump failed cell queue into LoRa queue.
-                    if(comm_conf != COMM_LORA_ONLY){
-                        DBGW("Cellular transmission failed! Switching to LoRa backup.");
-                    }
-                    lora_queue_msg lora_msg;
-                    while(xQueueReceive(xCellQueue, &lora_msg, 0) == pdTRUE){
-                        //Forward data to LoRa queue if there is space
-                        if(xQueueSend(xLoraQueue, &lora_msg, CELL_QUEUE_TIMEOUT) != pdTRUE){
-                            DBGE("Lora queue Timeout!");
-                        }
-                    }
-                }
-            }
-
         }
         /* Delay between checking queue*/
         vTaskDelay(pdMS_TO_TICKS(5000));

@@ -182,7 +182,7 @@ INC_FOLDERS += \
 # Libraries common to all targets
 LIB_FILES += \
   $(SDK_ROOT)/external/nrf_cc310/lib/cortex-m4/hard-float/libnrf_cc310_0.9.13.a \
-  ../libFiles/epCSLibrary.a \
+  ../libFiles/epCSLibrary_V00.00.03.a \
 
 # Required Embedded Planet Source Files
 INC_FOLDERS += \
@@ -195,13 +195,8 @@ INC_FOLDERS += \
   ../libFileHeaders/epLoRaHeaders \
   ../libFileHeaders/epUtilityHeaders \
 
-# Libraries common to all targets
-LIB_FILES += \
-
 # Optimization flags
 OPT = -Os -gdwarf-4
-# Uncomment the line below to enable link time optimization
-#OPT += -flto
 
 # C flags common to all targets
 CFLAGS += $(OPT)
@@ -269,7 +264,6 @@ LIB_FILES += -lc -lnosys
 LIB_FILES += -L../libFiles/ -l:libalgobsec.a
 # Add in math library
 LIB_FILES += -lm
-
 
 .PHONY: default help
 

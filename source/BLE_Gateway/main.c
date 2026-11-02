@@ -1,13 +1,29 @@
+/****************************************************************************                                                                     *
+ * Copyright (c) 2026 Embedded Planet, Inc.                                 *
+ * SPDX-License-Identifier: Apache-2.0                                      *
+ *                                                                          *
+ * Licensed under the Apache License, Version 2.0 (the "License");          *
+ * you may not use this file except in compliance with the License.         *
+ * You may obtain a copy of the License at                                  *
+ *                                                                          *
+ *     http://www.apache.org/licenses/LICENSE-2.0                           *
+ *                                                                          *
+ * Unless required by applicable law or agreed to in writing, software      *
+ * distributed under the License is distributed on an "AS IS" BASIS,        *
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. *
+ * See the License for the specific language governing permissions and      *
+ * limitations under the License.                                           *
+ ****************************************************************************/
 /**
  * Created on: Sept 1, 2022
- * Created by: golobmichael
+ * Created by: maherdan
  * 
  * Copyright (c) Embedded Planet, Inc - All rights reserved
  *
  * This source file is private and confidential.
  * Unauthorized copying of this file is strictly prohibited.
  * 
- * Version 1.0 - 01SEPT22  Initial, ported from: https://github.com/EmbeddedPlanet/nrf_sdk_17_1/tree/master/examples/ble_peripheral/ble_app_hrs_freertos, golobmichael
+ * Version 1.0 - 01SEPT22  Initial
  */
 #include <stdint.h>
 #include <inttypes.h>
@@ -32,12 +48,9 @@
 #include "fds.h"
 #include "nrf_drv_clock.h"
 #include "uart_helper.h"
-#include "cellular_common_api.h"
-#include "cellular_common.h"
-#include "cellular_comm_interface.h"
+#include "cell_helper.h"
 #include "ep_ble_central.h"
-#include "epcp_builder_agora.h"
-#include "bme680.h"
+#include "compact_payload.h"
 #include "htu21d.h"
 #include "icm20602.h"
 #include "qspi_helper.h"
@@ -53,17 +66,16 @@ QueueHandle_t xCellQueue;
 SemaphoreHandle_t xSensPwrEnSemaphore;
 
 TaskHandle_t ledTaskHandle;
-TaskHandle_t cellularTaskHandle;
 TaskHandle_t sensorSampleTaskHandle;
+TaskHandle_t cellularTaskHandle;
 
 //Activate / deactivate onboard sensors
 #define SI7021_ACTIVE   1
-#define VL53L0X_ACTIVE  0
 #define BME680_ACTIVE   0
 #define ICM20602_ACTIVE 0
 
 #define mainLED_TASK_STACK_SIZE             128
-#define mainCell_TASK_STACK_SIZE            4500
+#define mainCell_TASK_STACK_SIZE            8196
 #define DEAD_BEEF                           0xDEADBEEF                              /**< Value used as error code on stack dump, can be used to identify stack location on stack unwind. */
 #define OSTIMER_WAIT_FOR_QUEUE              2                                       /**< Number of ticks to wait for the timer queue to be ready */
 #define CELL_QUEUE_TIMEOUT                  pdMS_TO_TICKS(3000)                     /** Time to wait on queue before moving on to the next sample */
@@ -73,12 +85,16 @@ TaskHandle_t sensorSampleTaskHandle;
 ICM20602 icm;
 #endif
 
-CellStatus_t cell_status;
+// Frame counter for payload
+static uint8_t frameCounter = 0;
 
 system_info_struct system_info;
 
 /* Cellular Transmission Interval */
 static uint32_t cellTransInt = MIN_TRANS_INTERVAL;
+
+/* Save epcp version locally */
+uint8_t epcpVer = EPCP_VERSION;
 
 /* TWI instance ID. */
 #define TWI_INSTANCE_ID 0
@@ -88,10 +104,6 @@ static const nrfx_twi_t twi = NRFX_TWI_INSTANCE(TWI_INSTANCE_ID);
 
 /* Initial PDP config */
 CellularBLEConfig_t pdnConfig = { '\0' };
-CellularBLEConfig_t pdnConfigDefault = { '\0' };
-
-// Frame counter for payload
-static uint8_t frameCounter = 0;
 
 /* TWI initialization */
 void twi_init (void)
@@ -227,6 +239,9 @@ static void prvMiscInitialization( void )
     init_uart(MAIN_LOOP);
     uart_helper.dbgi = true;
 
+    // Start LF clock
+    set_time(0);
+
     // Initialize LEDs, default to alive blink normal operation
     led_init();
     led_mode(LED_ALIVE_BLINK,1,true);
@@ -264,7 +279,7 @@ static void prvMiscInitialization( void )
         system_info.updateVerMaj = ( ( xDescriptor.updateVersion >> 24 ) & 0xFF );
         system_info.updateVerMin = ( ( xDescriptor.updateVersion >> 16 ) & 0xFF );
         system_info.updateVerBui = ( xDescriptor.updateVersion & 0xFFFF );
-        sprintf( system_info.updateVerStr,"%02d.%02d.%02ld", system_info.updateVerMaj, system_info.updateVerMin, system_info.updateVerBui );
+        sprintf( system_info.updateVerStr,"%02x.%02x.%02x", system_info.updateVerMaj, system_info.updateVerMin, system_info.updateVerBui );
     }
     else
     {
@@ -273,7 +288,7 @@ static void prvMiscInitialization( void )
         system_info.updateVerMin = VERSION_MINOR;
         system_info.updateVerBui = VERSION_BUILD;
         /* Set string version */
-        sprintf( system_info.updateVerStr,"%02d.%02d.%02ld", system_info.updateVerMaj, system_info.updateVerMin, system_info.updateVerBui );
+        sprintf( system_info.updateVerStr,"%02d.%02d.%02d", system_info.updateVerMaj, system_info.updateVerMin, system_info.updateVerBui );
     }
 
     /* Read production table in external flash */
@@ -297,23 +312,6 @@ static void prvMiscInitialization( void )
         }
     }
 
-    /* Read ble settings table in external flash */
-    err_code = qspi_read( (uint8_t * ) &pdnConfig, sizeof(pdnConfig), otapal_BLE_TBL_START );
-    /* If error or invalid then use defaults */
-    //if( err_code != NRFX_SUCCESS )
-    //{
-    //    DBGE( "BLE Settings Table read failed with with error code %d", err_code );
-
-        strncpy(pdnConfig.apnName, pdnConfigDefault.apnName, sizeof(pdnConfigDefault.apnName));
-    //    DBGI("Resetting to defaults: APN: %s", pdnConfig.apnName);
-    //}
-    //else
-    //{
-        /* Display values read */
-        DBGI("Cell APN: %s, %d", pdnConfig.apnName, strlen(pdnConfig.apnName));
-    //}
-
-
     DBGI("***************************************************");
     DBGI("*       Embedded Planet: BLE CENTRAL v%s    *", system_info.updateVerStr);
     DBGI("***************************************************");
@@ -326,8 +324,7 @@ static void prvMiscInitialization( void )
                 NULL, 
                 tskIDLE_PRIORITY+2,
                 NULL);
-
-#if ENABLE_LED_OPERATION
+#endif
     /* Create the task to run tests. */
     xTaskCreate( LEDTask,
                 "LEDTask",
@@ -335,10 +332,7 @@ static void prvMiscInitialization( void )
                 NULL,
                 tskIDLE_PRIORITY+1,
                 &ledTaskHandle );
-#endif
-#endif
 
-    #if CELLULAR_ACTIVE
     /* Cell needs a couple of seconds before starting */
     nrf_delay_ms(2000);
 
@@ -369,10 +363,7 @@ static void prvMiscInitialization( void )
                 mainCell_TASK_STACK_SIZE,
                 NULL,
                 tskIDLE_PRIORITY+2,
-                &cellularTaskHandle );
-#endif     
-
-    qspi_uninit();
+                NULL );
 
 #if BLE_ACTIVE
     DBGI( ( "BLE Task Initializing .\r\n" ) );
@@ -387,9 +378,6 @@ static void prvMiscInitialization( void )
 void sensorSampleTask(void *pvParameters)
 {
     nrfx_err_t err;
-    
-    // Frame counter for payload
-    static uint8_t frameCounter = 0;
 
     init_uart(TASK_1);
 
@@ -420,18 +408,36 @@ void sensorSampleTask(void *pvParameters)
         cellDiag parameters = {'\0'};
         if( queryCellularDiag(&parameters) != CellSuccess )
         {
-            /* Do not send if unable to attain values */
+            /* Keep trying if unable to attain values */
             continue;
         }
+
+        //Loop and give time for IMEI during power up
+        uint8_t loopCnt = 0;
+        DBGI("Waiting for IMEI to be received");
+        while( parameters.imei[0] == 0 && parameters.imei[15] == 0 )
+        {
+            vTaskDelay(pdMS_TO_TICKS(500));
+            queryCellularDiag(&parameters);
+            loopCnt++;
+            if(loopCnt > 240)
+            {
+                break;
+            }
+        }
+        //Cannot send data on this loop if IMEI is unavailable
+        if(loopCnt > 240)
+        {
+            DBGE("No IMEI to receive");
+            continue;
+        }
+        DBGI("IMEI received");
         
         //Get current time. In seconds if we have already synced time via cellular or GNSS. If not, this represents the run time of the system.
         uint32_t ts = get_time_s();
 
-        //Set and adjust transmission frame counter
-        if(frameCounter >= 0xFF){
-            frameCounter = 0;
-        }
-        frameCounter++;
+        //Increment frame counter or roll over if needed
+        frameCounter = (uint8_t) (frameCounter + 1);
 
         //Get SI7021 data if active and available
         float si_temp, si_hum;
@@ -444,9 +450,9 @@ void sensorSampleTask(void *pvParameters)
             htu21_read_temperature_and_relative_humidity(&si_temp, &si_hum);
         #endif
 
-        //Get BME680 data if active and available
-        bme680_sensor_data bme_data; 
         #if BME680_ACTIVE == 1
+            //Get BME680 data if active and available
+            bme680_sensor_data bme_data; 
             DBGW("BME get semaphore");
             if(xSemaphoreTake(xBme680DataReadySemaphore, pdMS_TO_TICKS(5000))){
                 bme_data = bme680_get_latest_data();\
@@ -468,85 +474,83 @@ void sensorSampleTask(void *pvParameters)
         #endif
 
         //Set up compact payload
-        epcp_builder_agora agora_compact_payload;
-        epcp_builder_agora_init(&agora_compact_payload);
+        compact_payload_init();
 
         //Add System data to subpacket
         //Convert battery from float to int per spec
         uint32_t batVolt = ep_bsp_read_battery_voltage() * 100;
-        uint8_t epcpVer = EPCP_VERSION;
         if(frameCounter == 1){
-            agora_add_data(&agora_compact_payload, EPCP_SYSTEM, EPCP_VER, &epcpVer);
-            agora_add_data(&agora_compact_payload, EPCP_SYSTEM, EPCP_FW_MAJOR, &system_info.updateVerMaj);
-            agora_add_data(&agora_compact_payload, EPCP_SYSTEM, EPCP_FW_MINOR, &system_info.updateVerMin);
-            agora_add_data(&agora_compact_payload, EPCP_SYSTEM, EPCP_FW_PATCH, &system_info.updateVerBui);
-            agora_add_data(&agora_compact_payload, EPCP_SYSTEM, EPCP_MSG_CNT, &frameCounter);
-            agora_add_data(&agora_compact_payload, EPCP_SYSTEM, EPCP_SN, system_info.ep_serial);
-            agora_add_data(&agora_compact_payload, EPCP_SYSTEM, EPCP_TIME, &ts);
-            agora_add_data(&agora_compact_payload, EPCP_SYSTEM, EPCP_BATT, &batVolt);
+            compact_payload_add_data(EPCP_SYSTEM_FULL, EPCP_VER, &epcpVer);
+            compact_payload_add_data(EPCP_SYSTEM_FULL, EPCP_FW_MAJOR, &system_info.updateVerMaj);
+            compact_payload_add_data(EPCP_SYSTEM_FULL, EPCP_FW_MINOR, &system_info.updateVerMin);
+            compact_payload_add_data(EPCP_SYSTEM_FULL, EPCP_FW_PATCH, &system_info.updateVerBui);
+            compact_payload_add_data(EPCP_SYSTEM_FULL, EPCP_MSG_CNT, &frameCounter);
+            compact_payload_add_data(EPCP_SYSTEM_FULL, EPCP_SN, system_info.ep_serial);
+            compact_payload_add_data(EPCP_SYSTEM_FULL, EPCP_TIME, &ts);
+            compact_payload_add_data(EPCP_SYSTEM_FULL, EPCP_BATT, &batVolt);
         }else{
-            agora_add_data(&agora_compact_payload, EPCP_SYSTEM_V2, EPCP_VER, &epcpVer);
-            agora_add_data(&agora_compact_payload, EPCP_SYSTEM_V2, EPCP_MSG_CNT, &frameCounter);
-            agora_add_data(&agora_compact_payload, EPCP_SYSTEM_V2, EPCP_TIME, &ts);
-            agora_add_data(&agora_compact_payload, EPCP_SYSTEM_V2, EPCP_BATT, &batVolt);
+            compact_payload_add_data(EPCP_SYSTEM_CONDENSED, EPCP_VER, &epcpVer);
+            compact_payload_add_data(EPCP_SYSTEM_CONDENSED, EPCP_MSG_CNT, &frameCounter);
+            compact_payload_add_data(EPCP_SYSTEM_CONDENSED, EPCP_TIME, &ts);
+            compact_payload_add_data(EPCP_SYSTEM_CONDENSED, EPCP_BATT, &batVolt);
         }
 
         //Add Cell data to subpacket
         char* endptr;
         uint64_t hexIMEI = strtoull(parameters.imei,&endptr,10); //Convert IMEI from string to number
-        agora_add_data(&agora_compact_payload, EPCP_CELL, EPCP_IMEI, &(hexIMEI));
-        agora_add_data(&agora_compact_payload, EPCP_CELL, EPCP_RSSI, &(parameters.rssi));
-        agora_add_data(&agora_compact_payload, EPCP_CELL, EPCP_RSRQ, &(parameters.rsrq));
+        compact_payload_add_data(EPCP_CELL, EPCP_IMEI, &(hexIMEI));
+        compact_payload_add_data(EPCP_CELL, EPCP_RSSI, &(parameters.rssi));
+        compact_payload_add_data(EPCP_CELL, EPCP_RSRQ, &(parameters.rsrq));
 
         //Add HTU21D / SI7021 data to subpacket
         #if SI7021_ACTIVE == 1
             //Convert TEMP to int per spec
             int32_t temperature = si_temp * 100;
-            agora_add_data(&agora_compact_payload, EPCP_SI7021, EPCP_TEMP, &temperature);
+            compact_payload_add_data(EPCP_SI7021, EPCP_TEMP, &temperature);
             //Convert HUM to int per spec
             int32_t humidity = si_hum * 100;
-            agora_add_data(&agora_compact_payload, EPCP_SI7021, EPCP_HUM, &humidity);
+            compact_payload_add_data(EPCP_SI7021, EPCP_HUM, &humidity);
         #endif
 
         //Add BME680 data to subpacket
         #if BME680_ACTIVE == 1
             int32_t bmeTemp = bme_data.temp * 100;
-            agora_add_data(&agora_compact_payload, EPCP_BME680, EPCP_TEMP, &bmeTemp);
+            compact_payload_add_data(EPCP_BME680, EPCP_TEMP, &bmeTemp);
             int32_t bmePress = bme_data.raw_pressure * 100;
-            agora_add_data(&agora_compact_payload, EPCP_BME680, EPCP_PRES, &bmePress);
+            compact_payload_add_data(EPCP_BME680, EPCP_PRES, &bmePress);
             uint32_t bmeHumid = bme_data.humidity * 100;
-            agora_add_data(&agora_compact_payload, EPCP_BME680, EPCP_HUM, &bmeHumid);
+            compact_payload_add_data(EPCP_BME680, EPCP_HUM, &bmeHumid);
             uint32_t bmeGas = bme_data.raw_gas * 100;
-            agora_add_data(&agora_compact_payload, EPCP_BME680, EPCP_GAS, &bmeGas);
+            compact_payload_add_data(EPCP_BME680, EPCP_GAS, &bmeGas);
             uint32_t bmeCO2 = bme_data.co2_equivalent * 100;
-            agora_add_data(&agora_compact_payload, EPCP_BME680, EPCP_CO2, &bmeCO2);
+            compact_payload_add_data(EPCP_BME680, EPCP_CO2, &bmeCO2);
             uint32_t bmeVOC = bme_data.breath_voc_equivalent * 100;
-            agora_add_data(&agora_compact_payload, EPCP_BME680, EPCP_BREATH, &bmeVOC);
+            compact_payload_add_data(EPCP_BME680, EPCP_BREATH, &bmeVOC);
             uint32_t bmeIAQ = bme_data.iaq;
-            agora_add_data(&agora_compact_payload, EPCP_BME680, EPCP_IAQ_SCORE, &bmeIAQ);
+            compact_payload_add_data(EPCP_BME680, EPCP_IAQ_SCORE, &bmeIAQ);
             uint32_t bmeIAQAcc = bme_data.iaq_accuracy;
-            agora_add_data(&agora_compact_payload, EPCP_BME680, EPCP_IAQ_ACCURACY, &bmeIAQAcc);
+            compact_payload_add_data(EPCP_BME680, EPCP_IAQ_ACCURACY, &bmeIAQAcc);
         #endif
 
         //Add ICM20602 data to subpacket
         #if ICM20602_ACTIVE == 1
             int32_t accelX = icm_data.accel_x * 100;
-            agora_add_data(&agora_compact_payload, EPCP_ICM20602, EPCP_ACCEL_X, &accelX);
+            compact_payload_add_data(EPCP_ICM20602, EPCP_ACCEL_X, &accelX);
             int32_t accelY = icm_data.accel_y * 100;
-            agora_add_data(&agora_compact_payload, EPCP_ICM20602, EPCP_ACCEL_Y, &accelY);
+            compact_payload_add_data(EPCP_ICM20602, EPCP_ACCEL_Y, &accelY);
             int32_t accelZ = icm_data.accel_z * 100;
-            agora_add_data(&agora_compact_payload, EPCP_ICM20602, EPCP_ACCEL_Z, &accelZ);
+            compact_payload_add_data(EPCP_ICM20602, EPCP_ACCEL_Z, &accelZ);
             int32_t gyroX = icm_data.gyro_x * 100;
-            agora_add_data(&agora_compact_payload, EPCP_ICM20602, EPCP_GYRO_X, &gyroX);
+            compact_payload_add_data(EPCP_ICM20602, EPCP_GYRO_X, &gyroX);
             int32_t gyroY = icm_data.gyro_y * 100;
-            agora_add_data(&agora_compact_payload, EPCP_ICM20602, EPCP_GYRO_Y, &gyroY);
+            compact_payload_add_data(EPCP_ICM20602, EPCP_GYRO_Y, &gyroY);
             int32_t gyroZ = icm_data.gyro_z * 100;
-            agora_add_data(&agora_compact_payload, EPCP_ICM20602, EPCP_GYRO_Z, &gyroZ);
+            compact_payload_add_data(EPCP_ICM20602, EPCP_GYRO_Z, &gyroZ);
         #endif
 
         //Generate completed packet
         cell_queue_msg local_sensor_data_msg;
-        local_sensor_data_msg.size  = agora_get_packet(&agora_compact_payload, local_sensor_data_msg.data); 
+        local_sensor_data_msg.size  = compact_payload_get_packet(local_sensor_data_msg.data);
 
         //Forward data to cell queue if there is space
         if(xQueueSend(xCellQueue, &local_sensor_data_msg, CELL_QUEUE_TIMEOUT) != pdTRUE){
@@ -558,8 +562,7 @@ void sensorSampleTask(void *pvParameters)
 
         parse_downlink();
 
-        //Deinit the compact payload and put the task to sleep
-        epcp_builder_agora_deinit(&agora_compact_payload);
+        // Put the task to sleep
         vTaskDelay(pdMS_TO_TICKS(cellTransInt * 1000));
     }
 }
@@ -588,8 +591,7 @@ void addGnssQueueMsg( bool status )
     }
 
     //Set up compact payload
-    epcp_builder_agora agora_compact_payload;
-    epcp_builder_agora_init(&agora_compact_payload);
+    compact_payload_init();
 
     //Set up data converter
     union epcp_convert_type ct;
@@ -600,64 +602,61 @@ void addGnssQueueMsg( bool status )
     // Get time for data packet
     uint64_t ts = get_time_s();
 
-    agora_add_data(&agora_compact_payload, EPCP_SYSTEM_V2, EPCP_VER, &epcp_ver);
-    agora_add_data(&agora_compact_payload, EPCP_SYSTEM_V2, EPCP_MSG_CNT, &frameCounter);
-    agora_add_data(&agora_compact_payload, EPCP_SYSTEM_V2, EPCP_TIME, &ts);
+    compact_payload_add_data(EPCP_SYSTEM_CONDENSED, EPCP_VER, &epcpVer);
+    compact_payload_add_data(EPCP_SYSTEM_CONDENSED, EPCP_MSG_CNT, &frameCounter);
+    compact_payload_add_data(EPCP_SYSTEM_CONDENSED, EPCP_TIME, &ts);
     ct.ui32 = ep_bsp_read_battery_voltage() * 100;
-    agora_add_data(&agora_compact_payload, EPCP_SYSTEM_V2, EPCP_BATT, &(ct.ui32));
+    compact_payload_add_data(EPCP_SYSTEM_CONDENSED, EPCP_BATT, &(ct.ui32));
 
     //Add Cell data to subpacket
     char* endptr;
     uint64_t hexIMEI = strtoull(parameters.imei,&endptr,10); //Convert IMEI from string to number
-    agora_add_data(&agora_compact_payload, EPCP_CELL, EPCP_IMEI, &(hexIMEI));
-    agora_add_data(&agora_compact_payload, EPCP_CELL, EPCP_RSSI, &(parameters.rssi));
-    agora_add_data(&agora_compact_payload, EPCP_CELL, EPCP_RSRQ, &(parameters.rsrq));
+    compact_payload_add_data(EPCP_CELL, EPCP_IMEI, &(hexIMEI));
+    compact_payload_add_data(EPCP_CELL, EPCP_RSSI, &(parameters.rssi));
+    compact_payload_add_data(EPCP_CELL, EPCP_RSRQ, &(parameters.rsrq));
 
     if(parameters.fixTime != prevFixTime || status == false){
         //Add satellites
-        agora_add_data(&agora_compact_payload, EPCP_GNSS, EPCP_SAT, &(parameters.satellites));
+        compact_payload_add_data(EPCP_GNSS, EPCP_SAT, &(parameters.satellites));
         //If failed fix then set values to 0
         if(parameters.fix < 2){
             parameters.lat_float = 0;
             parameters.long_float = 0;
-            agora_set_error(&agora_compact_payload,EPCP_GNSS,true);
+            compact_payload_set_error(EPCP_GNSS,true);
         }
         //Add GNSS data to subpacket    
         prevFixTime = parameters.fixTime;
         //Convert LAT from float to int per spec
         ct.i32 = parameters.lat_float * 100000;
-        agora_add_data(&agora_compact_payload, EPCP_GNSS, EPCP_LAT, &(ct.ui32));
+        compact_payload_add_data(EPCP_GNSS, EPCP_LAT, &(ct.ui32));
         //Convert LON from float to int per spec
         ct.i32 = parameters.long_float * 100000;
-        agora_add_data(&agora_compact_payload, EPCP_GNSS, EPCP_LON, &(ct.ui32));
+        compact_payload_add_data(EPCP_GNSS, EPCP_LON, &(ct.ui32));
     }
 
     //Add GTP data to subpacket
     if(parameters.gtpLatFloat != 0){
         //Convert LAT from float to int per spec
         ct.i32 = parameters.gtpLatFloat * 100000;
-        agora_add_data(&agora_compact_payload, EPCP_GTP, EPCP_GTP_LAT, &(ct.ui32));
+        compact_payload_add_data(EPCP_GTP, EPCP_LAT, &(ct.ui32));
         //Convert LON from float to int per spec
         ct.i32 = parameters.gtpLongFloat * 100000;
-        agora_add_data(&agora_compact_payload, EPCP_GTP, EPCP_GTP_LON, &(ct.ui32));
+        compact_payload_add_data(EPCP_GTP, EPCP_LON, &(ct.ui32));
         //Add accuracy
         ct.i32 = parameters.gtpAccuracy * 100;
-        agora_add_data(&agora_compact_payload, EPCP_GTP, EPCP_GTP_ACC, &(ct.ui32));
+        compact_payload_add_data(EPCP_GTP, EPCP_ACC, &(ct.ui32));
         //Clear data
         parameters.gtpLatFloat = 0;
     }
 
     //Generate completed packet
     cell_queue_msg gnss_data_msg;
-    gnss_data_msg.size = agora_get_packet(&agora_compact_payload, gnss_data_msg.data);   
+    gnss_data_msg.size = compact_payload_get_packet(gnss_data_msg.data);   
 
     // Add new queue entry
     if(xQueueSend(xCellQueue, &gnss_data_msg, CELL_QUEUE_TIMEOUT) != pdTRUE){
         DBGE("Queue Timeout!");
-    }
-
-    //Free message
-    epcp_builder_agora_deinit(&agora_compact_payload);            
+    }         
 }
 
 /*-----------------------------------------------------------*/

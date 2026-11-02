@@ -43,10 +43,10 @@
 /* General defines */
 
 /* Version needs to be defined as string and ints */
-#define VERSION_NUM                         "00.00.04"                                   /**< Version. Will be passed to Device Information Service. */
+#define VERSION_NUM                         "00.00.06"                                   /**< Version. Will be passed to Device Information Service. */
 #define VERSION_MAJOR                       0
 #define VERSION_MINOR                       0
-#define VERSION_BUILD                       4
+#define VERSION_BUILD                       6
 
 /* Length of EP serial number is 6 characters */
 #define SERIAL_LENGTH   6

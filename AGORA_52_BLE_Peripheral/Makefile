@@ -225,13 +225,11 @@ INC_FOLDERS += \
 # Libraries common to all targets
 LIB_FILES += \
   $(SDK_ROOT)/external/nrf_cc310/lib/cortex-m4/hard-float/libnrf_cc310_0.9.13.a \
-  ../libFiles/epCSLibrary.a \
-  ../libFiles/epCSPeripheralLibrary.a \
+  ../libFiles/epCSLibrary_V00.00.03.a \
+  ../libFiles/epCSPeripheralLibrary_V00.00.03.a \
 
 # Optimization flags
 OPT = -O3 -g3
-# Uncomment the line below to enable link time optimization
-#OPT += -flto
 
 # C flags common to all targets
 CFLAGS += $(OPT)
